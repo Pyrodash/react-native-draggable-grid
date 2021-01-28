@@ -1,4 +1,12 @@
-function findKey<T>(map: { [key: string]: T }, fn: (item: T) => boolean) {
+export function isNumber(val: any) {
+  return val !== null && !isNaN(val)
+}
+
+export function readNumber(val: any, defaultValue: number): number {
+  return isNumber(val) ? val : defaultValue
+}
+
+export function findKey<T>(map: { [key: string]: T }, fn: (item: T) => boolean) {
   const keys = Object.keys(map)
   for (let i = 0; i < keys.length; i++) {
     if (fn(map[keys[i]])) {
@@ -7,7 +15,7 @@ function findKey<T>(map: { [key: string]: T }, fn: (item: T) => boolean) {
   }
 }
 
-function findIndex<T>(arr: T[], fn: (item: T) => boolean) {
+export function findIndex<T>(arr: T[], fn: (item: T) => boolean) {
   for (let i = 0; i < arr.length; i++) {
     if (fn(arr[i])) {
       return i
@@ -16,7 +24,7 @@ function findIndex<T>(arr: T[], fn: (item: T) => boolean) {
   return -1
 }
 
-function differenceBy(arr1: any[], arr2: any[], key: string) {
+export function differenceBy(arr1: any[], arr2: any[], key: string) {
   const result: any[] = []
   arr1.forEach(item1 => {
     const keyValue = item1[key]
@@ -26,5 +34,3 @@ function differenceBy(arr1: any[], arr2: any[], key: string) {
   })
   return result
 }
-
-export { findKey, findIndex, differenceBy }

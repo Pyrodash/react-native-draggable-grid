@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   PanResponder,
   Animated,
@@ -8,9 +8,16 @@ import {
   GestureResponderEvent,
   PanResponderGestureState,
   ViewStyle,
+  View,
+  ScrollView,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
+  NativeScrollPoint
 } from 'react-native'
 import { Block } from './block'
-import { findKey, findIndex, differenceBy } from './utils'
+import { findKey, findIndex, differenceBy, readNumber } from './utils'
+
+const SCROLL_INTERVAL = 25
 
 export interface IOnLayoutEvent {
   nativeEvent: { layout: { x: number; y: number; width: number; height: number } }
@@ -22,6 +29,10 @@ interface IBaseItemType {
   disabledReSorted?: boolean
 }
 
+export interface IScrollByOptions extends IPositionOffset {
+  animated?: boolean
+}
+
 export interface IDraggableGridProps<DataType extends IBaseItemType> {
   numColumns: number
   data: DataType[]
@@ -29,16 +40,21 @@ export interface IDraggableGridProps<DataType extends IBaseItemType> {
   style?: ViewStyle
   itemHeight?: number
   dragStartAnimation?: StyleProp<any>
+  scrollAreaSize?: number
+  scrollInterval?: number
+  scrollStep?: number | ((iteration: number) => number)
+  layoutOffset?: IPositionOffset
   onItemPress?: (item: DataType) => void
   onDragStart?: (item: DataType) => void
   onDragging?: (gestureState: PanResponderGestureState) => void
   onDragRelease?: (newSortedData: DataType[]) => void
   onResetSort?: (newSortedData: DataType[]) => void
 }
+
 interface IMap<T> {
   [key:string]: T
 }
-interface IPositionOffset {
+export interface IPositionOffset {
   x: number
   y: number
 }
@@ -50,18 +66,23 @@ interface IItem<DataType> {
   itemData: DataType
   currentPosition: Animated.AnimatedValueXY
 }
+
 let activeBlockOffset = { x: 0, y: 0 }
 
 export const DraggableGrid = function<DataType extends IBaseItemType>(
   props: IDraggableGridProps<DataType>,
 ) {
+  const scrollAreaSize = readNumber(props.scrollAreaSize, 20)
+  const scrollInterval = props.scrollInterval || SCROLL_INTERVAL
+
   const [blockPositions] = useState<IPositionOffset[]>([])
   const [orderMap] = useState<IMap<IOrderMapItem>>({})
   const [itemMap] = useState<IMap<DataType>>({})
   const [items] = useState<IItem<DataType>[]>([])
   const [blockHeight, setBlockHeight] = useState(0)
   const [blockWidth, setBlockWidth] = useState(0)
-  const [gridHeight] = useState<Animated.Value>(new Animated.Value(0))
+  const [gridHeight, setGridHeight] = useState(0)
+  const [gridHeightValue] = useState<Animated.Value>(new Animated.Value(0))
   const [hadInitBlockSize, setHadInitBlockSize] = useState(false)
   const [dragStartAnimatedValue] = useState(new Animated.Value(1))
   const [gridLayout, setGridLayout] = useState({
@@ -71,15 +92,38 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
     height: 0,
   })
   const [activeItemIndex, setActiveItemIndex] = useState<undefined | number>()
+  const [isDragging, setIsDragging] = useState<boolean>(false)
+  const contentOffset = useRef<NativeScrollPoint>({ x: 0, y: 0 })
+  const dragOffset = useRef({ x: 0, y: 0})
+  const scrollTimer = useRef<number>(0)
+  const scrollView = React.useRef<ScrollView>(null)
+  const animatedView = React.useRef<View>(null)
+  const layoutOffsetX = props.layoutOffset?.x || 0
+  const layoutOffsetY = props.layoutOffset?.y || 0
 
   const assessGridSize = (event: IOnLayoutEvent) => {
     if (!hadInitBlockSize) {
-      let blockWidth = event.nativeEvent.layout.width / props.numColumns
+      const { layout } = event.nativeEvent
+
+      layout.x += layoutOffsetX
+      layout.y += layoutOffsetY
+      
+      let blockWidth = layout.width / props.numColumns
       let blockHeight = props.itemHeight || blockWidth
       setBlockWidth(blockWidth)
       setBlockHeight(blockHeight)
-      setGridLayout(event.nativeEvent.layout)
+      setGridLayout(layout)
       setHadInitBlockSize(true)
+
+      animatedView.current?.measure((x, y, width, height, pageX, pageY) => {
+        layout.x = pageX + layoutOffsetX
+        layout.y = pageY + layoutOffsetY
+
+        setGridLayout(layout)
+
+        //layout.width = width
+        //layout.height = height
+      })
     }
   }
   const [panResponderCapture, setPanResponderCapture] = useState(false)
@@ -113,20 +157,133 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
       y,
     }
   }
+  function getScrollStep(index: number): number {
+    if (typeof props.scrollStep === 'function') {
+      return props.scrollStep(index)
+    } else if (props.scrollStep || props.scrollStep === 0) {
+      return props.scrollStep
+    }
+
+    return index > 120 ? 18 : 9 // double speed after 3s
+  }
   function resetGridHeight() {
     const rowCount = Math.ceil(props.data.length / props.numColumns)
-    gridHeight.setValue(rowCount * blockHeight)
+    const height = rowCount * blockHeight
+
+    setGridHeight(height)
+    gridHeightValue.setValue(height)
+  }
+  function startAutoScroll({ shouldScroll, getScrollStep }: {
+    shouldScroll: () => boolean
+    getScrollStep: (scrollStepIteration: number) => number
+  }) {
+    const activeItem = getActiveItem()
+
+    if (!activeItem) return
+
+    let i = 0
+
+    const handleAutoScroll = () => {
+      if (shouldScroll()) {
+        const scrollStep = getScrollStep(i++)
+        
+        scrollBy({ x: 0, y: scrollStep })
+        dragOffset.current.y += scrollStep
+
+        moveBlockBy({
+          x: 0,
+          y: scrollStep,
+        })
+      } else {
+        stopAutoScroll()
+      }
+    }
+
+    if (shouldScroll()) {
+      //handleAutoScroll()
+      scrollTimer.current = setInterval(handleAutoScroll, scrollInterval)
+    }
+  }
+  function stopAutoScroll() {
+    clearInterval(scrollTimer.current)
+    scrollTimer.current = 0
+  }
+  function scrollBy({ x, y, animated = false }: IScrollByOptions) {
+    if (!scrollView.current) return false
+    
+    scrollView.current.scrollTo({
+      x: contentOffset.current.x + x,
+      y: contentOffset.current.y + y,
+      animated,
+    })
+    
+    contentOffset.current.x += x
+    contentOffset.current.y += y
+
+    return true
+  }
+  function moveBlockTo(newPosition: IPositionOffset) {
+    const activeItem = getActiveItem()
+    if (!activeItem) return false
+
+    const originPosition = blockPositions[orderMap[activeItem.key].order]
+    const dragPositionToActivePositionDistance = getDistance(newPosition, originPosition)
+    activeItem.currentPosition.setValue(newPosition)
+
+    let closetItemIndex = activeItemIndex as number
+    let closetDistance = dragPositionToActivePositionDistance
+
+    items.forEach((item, index) => {
+      if (item.itemData.disabledReSorted) return
+      if (index != activeItemIndex) {
+        const dragPositionToItemPositionDistance = getDistance(
+          newPosition,
+          blockPositions[orderMap[item.key].order],
+        )
+        if (
+          dragPositionToItemPositionDistance < closetDistance &&
+          dragPositionToItemPositionDistance < blockWidth
+        ) {
+          closetItemIndex = index
+          closetDistance = dragPositionToItemPositionDistance
+        }
+      }
+    })
+    if (activeItemIndex != closetItemIndex) {
+      const closetOrder = orderMap[items[closetItemIndex].key].order
+      resetBlockPositionByOrder(orderMap[activeItem.key].order, closetOrder)
+      orderMap[activeItem.key].order = closetOrder
+      props.onResetSort && props.onResetSort(getSortData())
+    }
+  }
+  function moveBlockBy(offset: IPositionOffset) {
+    const activeItem = getActiveItem()
+
+    if (!activeItem) return false
+
+    moveBlockTo({
+      x: (activeItem.currentPosition.x as any)._value + offset.x,
+      y: (activeItem.currentPosition.y as any)._value + offset.y,
+    })
+
+    return true
   }
   function onBlockPress(itemIndex: number) {
     props.onItemPress && props.onItemPress(items[itemIndex].itemData)
+  }
+  function onScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
+    contentOffset.current = e.nativeEvent.contentOffset
   }
   function onStartDrag(_: GestureResponderEvent, gestureState: PanResponderGestureState) {
     const activeItem = getActiveItem()
     if (!activeItem) return false
     props.onDragStart && props.onDragStart(activeItem.itemData)
+    setIsDragging(true)
+    dragOffset.current = { x: 0, y: 0 }
     const { x0, y0, moveX, moveY } = gestureState
     const activeOrigin = blockPositions[orderMap[activeItem.key].order]
     const x = activeOrigin.x - x0
+    //const y = y0 - activeOrigin.y - layoutOffsetY
     const y = activeOrigin.y - y0
     activeItem.currentPosition.setOffset({
       x,
@@ -146,47 +303,70 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
     if (!activeItem) return false
     const { moveX, moveY } = gestureState
     props.onDragging && props.onDragging(gestureState)
+    setIsDragging(false)
 
     const xChokeAmount = Math.max(0, activeBlockOffset.x + moveX - (gridLayout.width - blockWidth))
     const xMinChokeAmount = Math.min(0, activeBlockOffset.x + moveX)
 
     const dragPosition = {
-      x: moveX - xChokeAmount - xMinChokeAmount,
-      y: moveY,
+      x: moveX - xChokeAmount - xMinChokeAmount + dragOffset.current.x,
+      y: moveY + dragOffset.current.y,
     }
-    const originPosition = blockPositions[orderMap[activeItem.key].order]
-    const dragPositionToActivePositionDistance = getDistance(dragPosition, originPosition)
-    activeItem.currentPosition.setValue(dragPosition)
 
-    let closetItemIndex = activeItemIndex as number
-    let closetDistance = dragPositionToActivePositionDistance
+    const startOffset = gridLayout.y + contentOffset.current.y
+    const startY = startOffset + scrollAreaSize
+    const endY = startOffset + gridLayout.height - scrollAreaSize
 
-    items.forEach((item, index) => {
-      if (item.itemData.disabledReSorted) return
-      if (index != activeItemIndex) {
-        const dragPositionToItemPositionDistance = getDistance(
-          dragPosition,
-          blockPositions[orderMap[item.key].order],
-        )
-        if (
-          dragPositionToItemPositionDistance < closetDistance &&
-          dragPositionToItemPositionDistance < blockWidth
-        ) {
-          closetItemIndex = index
-          closetDistance = dragPositionToItemPositionDistance
-        }
+    const blockY = dragPosition.y
+
+    if (!scrollTimer.current) {
+      if (blockY + blockHeight > endY) {
+        startAutoScroll({
+          shouldScroll: () => {
+            const endReached = (gridHeight - (contentOffset.current.y + gridLayout.height)) <= 1.5
+            const currentY: number = (activeItem.currentPosition.y as any)._value + blockHeight
+            
+            return !endReached && currentY > endY
+          },
+          getScrollStep: (i) => {
+            const contentOffsetY = contentOffset.current.y
+            let scrollStep = getScrollStep(i)
+
+            if (contentOffsetY + scrollStep > gridHeight) {
+              scrollStep = gridHeight - contentOffsetY
+            }
+
+            return scrollStep
+          }
+        })
+      } else if (blockY < startY) {
+        startAutoScroll({
+          shouldScroll: () => {
+            const topReached = contentOffset.current.y <= 0
+            const currentY: number = (activeItem.currentPosition.y as any)._value
+            
+            return !topReached && currentY < startY
+          },
+          getScrollStep: (i) => {
+            const contentOffsetY = contentOffset.current.y
+            let scrollStep = getScrollStep(i)
+
+            if (contentOffsetY - scrollStep < 0) {
+              scrollStep = contentOffsetY
+            }
+
+            return -scrollStep
+          }
+        })
       }
-    })
-    if (activeItemIndex != closetItemIndex) {
-      const closetOrder = orderMap[items[closetItemIndex].key].order
-      resetBlockPositionByOrder(orderMap[activeItem.key].order, closetOrder)
-      orderMap[activeItem.key].order = closetOrder
-      props.onResetSort && props.onResetSort(getSortData())
     }
+
+    moveBlockTo(dragPosition)
   }
   function onHandRelease() {
     const activeItem = getActiveItem()
     if (!activeItem) return false
+    if (scrollTimer.current) stopAutoScroll()
     props.onDragRelease && props.onDragRelease(getSortData())
     setPanResponderCapture(false)
     activeItem.currentPosition.flattenOffset()
@@ -377,17 +557,26 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
   })
 
   return (
-    <Animated.View
-      style={[
-        styles.draggableGrid,
-        props.style,
-        {
-          height: gridHeight,
-        },
-      ]}
-      onLayout={assessGridSize}>
-      {hadInitBlockSize && itemList}
-    </Animated.View>
+    <ScrollView
+      scrollEnabled={!isDragging}
+      onLayout={assessGridSize}
+      onScroll={onScroll}
+      scrollEventThrottle={0.9 * scrollInterval}
+      ref={scrollView}
+    >
+      <Animated.View
+        ref={animatedView}
+        style={[
+          styles.draggableGrid,
+          props.style,
+          {
+            height: gridHeightValue,
+          },
+        ]}
+      >
+        {hadInitBlockSize && itemList}
+      </Animated.View>
+    </ScrollView>
   )
 }
 

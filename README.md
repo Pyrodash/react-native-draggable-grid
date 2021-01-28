@@ -126,6 +126,9 @@ const styles = StyleSheet.create({
 | itemHeight | number | no       | if not set this, it will the same as itemWidth |
 | dragStartAnimation | object | no | custom drag start animation |
 | style      | object | no       | grid styles |
+| scrollAreaSize | number | no   | allowed space from edges to start scrolling from |
+| scrollInterval | number | no   | time interval to automatically scroll when dragging |
+| scrollStep | number or ((iteration: number) => number) | no   | the amount of pixels to scroll each scroll interval iteration |
 
 ## Event Props
 
