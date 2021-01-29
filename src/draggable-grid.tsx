@@ -44,6 +44,7 @@ export interface IDraggableGridProps<DataType extends IBaseItemType> {
   scrollInterval?: number
   scrollStep?: number | ((iteration: number) => number)
   layoutOffset?: IPositionOffset
+  contentOffset?: IPositionOffset
   onItemPress?: (item: DataType) => void
   onDragStart?: (item: DataType) => void
   onDragging?: (gestureState: PanResponderGestureState) => void
@@ -93,7 +94,7 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
   })
   const [activeItemIndex, setActiveItemIndex] = useState<undefined | number>()
   const [isDragging, setIsDragging] = useState<boolean>(false)
-  const contentOffset = useRef<NativeScrollPoint>({ x: 0, y: 0 })
+  const contentOffset = useRef<NativeScrollPoint>(props.contentOffset || { x: 0, y: 0 })
   const dragOffset = useRef({ x: 0, y: 0})
   const scrollTimer = useRef<number>(0)
   const scrollView = React.useRef<ScrollView>(null)
@@ -272,7 +273,10 @@ export const DraggableGrid = function<DataType extends IBaseItemType>(
     props.onItemPress && props.onItemPress(items[itemIndex].itemData)
   }
   function onScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
-    contentOffset.current = e.nativeEvent.contentOffset
+    const { x, y } = e.nativeEvent.contentOffset
+    
+    contentOffset.current.x = x
+    contentOffset.current.y = y
   }
   function onStartDrag(_: GestureResponderEvent, gestureState: PanResponderGestureState) {
     const activeItem = getActiveItem()

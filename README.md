@@ -129,6 +129,7 @@ const styles = StyleSheet.create({
 | scrollAreaSize | number | no   | allowed space from edges to start scrolling from |
 | scrollInterval | number | no   | time interval to automatically scroll when dragging |
 | scrollStep | number or ((iteration: number) => number) | no   | the amount of pixels to scroll each scroll interval iteration |
+| contentOffset | {x: number, y: number} | no | object used to set initial scroll state and keep updated scroll state |
 
 ## Event Props
 
